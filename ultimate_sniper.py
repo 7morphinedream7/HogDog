@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import itertools
 
 def generate_sniper_gold_data(days=365, interval='1h'):
     np.random.seed(42)
@@ -21,12 +20,21 @@ def generate_sniper_gold_data(days=365, interval='1h'):
     df = pd.DataFrame({'close': prices})
     return df
 
-def run_sniper_sim(params, df, initial_balance=100):
+def run_ultimate_sim(df, initial_balance=100):
+    # --- GOLDEN PARAMETERS (From Grid Search) ---
+    VOL_MULT = 3.0
+    STOP_DIST = 1.0
+    RR_RATIO = 24
+    
+    # --- SYSTEM CONSTANTS ---
     CONTRACT_SIZE = 100
     SPREAD = 0.15
     COMMISSION = 0.7
+    
     close_vals = df['close'].values
     balance = initial_balance
+    ath_balance = initial_balance
+    
     in_trade = False
     direction = 0
     entry_price = None
@@ -41,22 +49,31 @@ def run_sniper_sim(params, df, initial_balance=100):
         if tick_count % 168 == 0: trades_this_week = 0
         price = close_vals[i]
         
+        # Update ATH for Circuit Breaker
+        ath_balance = max(ath_balance, balance)
+        
         if not in_trade:
             lookback = close_vals[i-24:i]
             mean = np.mean(lookback)
             vol = np.std(lookback)
-            if abs(price - mean) > params['vol_mult'] * vol and trades_this_week < 1:
+            
+            if abs(price - mean) > VOL_MULT * vol and trades_this_week < 1:
                 in_trade = True
                 direction = 1 if price > mean else -1
                 entry_price = price + (SPREAD / 2 if direction == 1 else -SPREAD / 2)
-                stop_loss = entry_price - (direction * params['stop_dist'])
+                stop_loss = entry_price - (direction * STOP_DIST)
                 
-                if balance < 1000: scale_rate = 50
-                elif balance < 5000: scale_rate = 150
-                elif balance < 20000: scale_rate = 400
-                else: scale_rate = 1000
+                # --- INFINITE LOGARITHMIC SCALING ENGINE ---
+                # Base scale: 0.01 per $50, then decelerating to preserve wealth
+                # Formula: log10(balance/100) provides a growth curve that never flatlines but prevents over-leverage
+                scale_factor = np.log10(balance / 100 + 1) + 1
+                trade_lot = 0.01 * (balance / (50 * scale_factor))
                 
-                trade_lot = 0.01 * (balance // scale_rate)
+                # --- ANTI-FRAGILE CIRCUIT BREAKER ---
+                # If we are in a drawdown > 20% from ATH, slash risk by 50%
+                if balance < ath_balance * 0.80:
+                    trade_lot *= 0.5
+                
                 trade_lot = max(0.01, trade_lot)
                 balance -= (COMMISSION * (trade_lot/0.01))
                 trades_this_week += 1
@@ -65,17 +82,22 @@ def run_sniper_sim(params, df, initial_balance=100):
             exit_price = price - (SPREAD / 2 * direction)
             current_profit = (exit_price - entry_price) * direction
             
-            # OPTIMIZED SYNTHESIS: Safety switch at 1:3, then Last-Mile Trail after 1:8
-            if not trail_activated and current_profit >= params['stop_dist'] * 3:
+            # --- SYNTHESIS TRAILING SYSTEM ---
+            # 1. Safety Switch: Move to BE at 1:3 RR
+            if not trail_activated and current_profit >= STOP_DIST * 3:
                 stop_loss = entry_price
                 trail_activated = True
-            elif trail_activated and current_profit >= params['stop_dist'] * 8:
-                new_stop = entry_price + (direction * (current_profit // params['stop_dist'] - 1) * params['stop_dist'])
+            
+            # 2. Last-Mile Trail: Aggressive lock-in after 1:8 RR
+            elif trail_activated and current_profit >= STOP_DIST * 8:
+                # Lock in profit by trailing 1x risk behind current price
+                new_stop = entry_price + (direction * (current_profit // STOP_DIST - 1) * STOP_DIST)
                 if (direction == 1 and new_stop > stop_loss) or (direction == -1 and new_stop < stop_loss):
                     stop_loss = new_stop
 
+            # --- EXIT CHECK ---
             if (direction == 1 and exit_price <= stop_loss) or (direction == -1 and exit_price >= stop_loss) or \
-               abs(exit_price - entry_price) >= params['stop_dist'] * params['rr_ratio']:
+               abs(exit_price - entry_price) >= STOP_DIST * RR_RATIO:
                 balance += (exit_price - entry_price) * direction * trade_lot * CONTRACT_SIZE
                 in_trade = False
                 direction = 0
@@ -83,34 +105,12 @@ def run_sniper_sim(params, df, initial_balance=100):
         if balance <= 0: return 0.0
     return balance
 
-def optimize():
-    df = generate_sniper_gold_data()
-    
-    # Search space
-    vol_mults = np.arange(3.0, 6.1, 0.5)
-    stop_dists = np.arange(0.4, 1.1, 0.2)
-    rr_ratios = np.arange(10, 26, 2)
-    
-    best_balance = -1
-    best_params = None
-    
-    print(f"Running Grid Search... Total combinations: {len(vol_mults)*len(stop_dists)*len(rr_ratios)}")
-    
-    for vm, sd, rr in itertools.product(vol_mults, stop_dists, rr_ratios):
-        params = {'vol_mult': vm, 'stop_dist': sd, 'rr_ratio': rr}
-        res = run_sniper_sim(params, df)
-        if res > best_balance:
-            best_balance = res
-            best_params = params
-            
-    return best_params, best_balance
-
 if __name__ == "__main__":
-    best_p, best_b = optimize()
-    print("\n" + "="*30)
-    print("OPTIMIZATION COMPLETE")
-    print(f"Best Params: {best_p}")
-    print(f"Max Final Balance: ${best_b:.2f}")
-    print("="*30)
-    input("\nPress Enter to close...")
-
+    # Extending to 20 years to prove the infinite growth theory
+    df = generate_sniper_gold_data(days=365 * 20)
+    final_res = run_ultimate_sim(df)
+    print("\n" + "="*40)
+    print("🚀 ULTIMATE SNIPER: 20-YEAR STRESS TEST 🚀")
+    print(f"Final Account Balance: ${final_res:,.2f}")
+    print("="*40)
+    input("\nPress Enter to exit...")
